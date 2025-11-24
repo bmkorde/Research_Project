@@ -17,6 +17,13 @@ library(purrr)
 library(tidyr)
 library(readr)
 library(stringr)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(pROC)
+library(ggplot2)
+library(broom)
+
 data_root <- "bbl_json"
 data_file <- "524915.json"
 data_path <- file.path(data_root,data_file)
@@ -29,14 +36,6 @@ target <- sample_json$innings$target$runs[[2]]
 ```
 
 ```{r}
-library(jsonlite)
-library(dplyr)
-library(purrr)
-library(tidyr)
-library(readr)
-library(stringr)
-
-data_root <- "bbl_json"
 files <- list.files(data_root, pattern = "*.json", full.names = TRUE)
 
 # Helper functions
@@ -119,7 +118,7 @@ target_df <- map_dfr(files, function(file) {
     json <- fromJSON(readLines(file, warn = FALSE))
     match_id <- str_remove(basename(file), ".json")
     
-    # Extract target from second innings if available
+    # Extract target from second innings
     target_runs <- json$innings$target$runs[2] %||% NA_integer_
     
     tibble(
@@ -141,11 +140,11 @@ balls <- map_dfr(files, function(file) {
     json <- fromJSON(readLines(file, warn = FALSE))
     info <- json$info
     info$venue <- clean_venues(info$venue)
-    # --- Extract target score if available ---
+    
     target_runs <- tryCatch({
       json$innings$target$runs[[2]] %||% NA_integer_
     }, error = function(e) NA_integer_)
-    # --- Match-level metadata ---
+    
     row_meta <- tibble(
       match_id = as.character(str_remove(basename(file), ".json")),
       date = as.character(info$dates[[1]]),
@@ -160,17 +159,17 @@ balls <- map_dfr(files, function(file) {
       target = target_runs
     )
     
-    # --- Innings-level iteration ---
+    
     map_dfr(1:nrow(json$innings), function(i) {
       team <- as.character(json$innings[i, "team"][[1]])
       overs_df <- json$innings[i, "overs"][[1]]
       
-      # --- Over-level iteration ---
+      
       map_dfr(1:nrow(overs_df), function(o) {
         deliveries <- overs_df$deliveries[[o]]
         over_num <- as.integer(overs_df$over[o])
         
-        # --- Delivery-level flattening ---
+       
         deliveries_flat <- deliveries %>%
           mutate(
             innings = as.integer(i),
@@ -188,7 +187,7 @@ balls <- map_dfr(files, function(file) {
             powerplay_type = as.character(if (over_num < 6) "Mandatory" else NA_character_)
           )
         
-        # --- Wicket logic safely extracted row-wise ---
+       
         wicket_info <- map_dfr(seq_len(nrow(deliveries)), function(b) {
           wkts <- deliveries$wickets[[b]]
           tibble(
@@ -198,7 +197,7 @@ balls <- map_dfr(files, function(file) {
           )
         })
         
-        # --- Combine safely ---
+        
         bind_cols(deliveries_flat, wicket_info)
       })
     }) %>% bind_cols(row_meta[rep(1, nrow(.)), ])
@@ -217,9 +216,8 @@ head(balls)
 ```
 
 ```{r}
-library(dplyr)
 
-# --- Batting scorecard ---
+
 batting_scorecard <- balls %>%
   group_by(match_id, batter) %>%
   summarise(
@@ -231,7 +229,7 @@ batting_scorecard <- balls %>%
   ) %>%
   arrange(match_id, desc(runs))
 
-# --- Bowling scorecard ---
+
 bowling_scorecard <- balls %>%
   group_by(match_id, bowler) %>%
   summarise(
@@ -246,7 +244,7 @@ bowling_scorecard <- balls %>%
   arrange(match_id, desc(wickets))
 
 
-# --- View one match example ---
+
 match_example <- unique(balls$match_id)[1]
 
 batting_scorecard %>% filter(match_id == match_example)
@@ -306,36 +304,28 @@ snapshot_df <- balls %>%
 
 
 ```{r}
-library(caret)
-library(rpart)
-library(rpart.plot)
-library(pROC)
-library(ggplot2)
-library(broom)
-library(dplyr)
 
-# Step 1: Prepare data
+# Prepare data
 model_data <- snapshot_df %>%
   mutate(across(c(batting_team, bowling_team, venue, home_team), as.factor),
          match_winner = as.factor(match_winner)) %>%
   drop_na(match_winner)
 
-# Step 2: Train-test split
+# Train-test split
 set.seed(42)
 train_index <- createDataPartition(model_data$match_winner, p = 0.8, list = FALSE)
 train_data <- model_data[train_index, ]
 test_data <- model_data[-train_index, ]
 
-# Step 3: Align factor levels
 for (col in c("batting_team", "bowling_team", "venue", "home_team")) {
   test_data[[col]] <- factor(test_data[[col]], levels = levels(train_data[[col]]))
 }
 
-# Step 4: Drop rows with unseen levels (now NA)
+#Drop rows with unseen levels 
 test_data <- test_data %>%
   filter(!is.na(batting_team), !is.na(bowling_team), !is.na(venue), !is.na(home_team))
 
-# Step 5: Logistic regression model
+#Logistic regression model
 log_model <- glm(match_winner ~ current_runs + wickets_lost + remaining_wickets +
                    balls_remaining + overs_completed + run_rate + required_run_rate +
                    powerplay + batting_team + bowling_team + venue + home_team,
@@ -343,12 +333,12 @@ log_model <- glm(match_winner ~ current_runs + wickets_lost + remaining_wickets 
 
 summary(log_model)
 
-# Step 6: Predict and evaluate
+#Predict and evaluate
 log_probs <- predict(log_model, test_data, type = "response")
 log_pred <- ifelse(log_probs > 0.5, 1, 0)
 confusionMatrix(factor(log_pred), test_data$match_winner)
 
-# Step 7: Decision tree model
+#Decision tree model
 tree_model <- rpart(match_winner ~ current_runs + wickets_lost + remaining_wickets +
                       balls_remaining + overs_completed + run_rate + required_run_rate +
                       powerplay + batting_team + bowling_team + venue + home_team,
@@ -357,15 +347,41 @@ tree_model <- rpart(match_winner ~ current_runs + wickets_lost + remaining_wicke
 tree_pred <- predict(tree_model, test_data, type = "class")
 confusionMatrix(tree_pred, test_data$match_winner)
 
-# Step 8: Visualize decision tree
+#Visualize decision tree
 rpart.plot(tree_model, type = 2, extra = 104, fallen.leaves = TRUE)
+#Decision tree ROC & AUC 
 
-# Step 9: ROC curve and AUC
+tree_probs <- predict(tree_model, test_data, type = "prob")[, "1"]
+
+if (is.factor(test_data$match_winner)) {
+  # try straightforward conversion if levels are "0"/"1"
+  true_labels <- suppressWarnings(as.numeric(as.character(test_data$match_winner)))
+} else {
+  true_labels <- as.numeric(test_data$match_winner)
+}
+
+if (any(is.na(true_labels))) {
+  levs <- unique(as.character(test_data$match_winner))
+  message("Detected non-numeric match_winner levels: ", paste(levs, collapse = ", "))
+  # adjust the mapping below to match your factor labels if different
+  true_labels <- ifelse(as.character(test_data$match_winner) %in% c("1", "win", "Win", "WIN"), 1, 0)
+}
+
+stopifnot(length(tree_probs) == length(true_labels))
+if (length(unique(true_labels)) < 2) stop("true_labels has only one class — cannot compute ROC.")
+if (all(is.na(tree_probs))) stop("tree_probs are all NA — check predict() call.")
+
+# ROC curve and AUC Decision Tree
+roc_tree <- roc(response = true_labels, predictor = tree_probs, quiet = TRUE)
+auc_tree <- auc(roc_tree)
+cat("Decision tree AUC:", round(auc_tree, 4), "\n")
+
+# ROC curve and AUC Logistic Regression
 roc_curve <- roc(test_data$match_winner, log_probs)
 plot(roc_curve, col = "blue", main = "ROC Curve - Logistic Regression")
 auc(roc_curve)
 
-# Step 10: Variable importance (logistic regression)
+# Variable importance
 tidy(log_model) %>%
   filter(term != "(Intercept)") %>%
   mutate(abs_estimate = abs(estimate)) %>%
@@ -380,11 +396,8 @@ tidy(log_model) %>%
 
 
 ```{r}
-library(dplyr)
-library(ggplot2)
-library(tidyr)
 
-# Prepare bowling summary consistent with batting_scorecard naming
+# Bowling summary 
 
 bowling_summary <- bowling_scorecard %>%
 rename(balls_bowled = balls_bowled, runs_conceded = runs_conceded, wickets_taken = wickets) %>%
@@ -398,7 +411,7 @@ runs_conceded = sum(runs_conceded, na.rm = TRUE),
 ) %>%
 rename(player = bowler)
 
-# Prepare batting summary
+# Batting summary
 
 batting_summary <- batting_scorecard %>%
 group_by(batter) %>%
@@ -411,7 +424,7 @@ sixes = sum(sixes, na.rm = TRUE),
 ) %>%
 rename(player = batter)
 
-# Combine batting + bowling (players may appear in only one)
+# Combine batting + bowling 
 
 player_stats <- full_join(batting_summary, bowling_summary, by = "player") %>%
 replace_na(list(
@@ -424,12 +437,11 @@ wickets = 0,
 runs_conceded = 0
 ))
 
-# Convert balls_bowled to overs_decimal if you want a readable value
 
 player_stats <- player_stats %>%
 mutate(
 overs_bowled = balls_bowled / 6,
-# Classification rules (allrounder first)
+# Classification rules
 role = case_when(
 balls_faced >= 20 & balls_bowled >= 12 ~ "Allrounder",       # >=2 overs (12 balls) and >=20 balls faced
 balls_bowled >= 18 & !(balls_faced >= 20 & balls_bowled >= 12) ~ "Bowler",  # >=3 overs (18 balls) & not allrounder
@@ -438,12 +450,7 @@ TRUE ~ "Other"
 )
 )
 
-# Inspect top few
-
 player_stats %>% arrange(desc(role), desc(runs)) %>% slice_head(n = 20)
-
-
-# 1) Count of players by role
 
 role_counts <- player_stats %>% count(role) %>% arrange(desc(n))
 ggplot(role_counts, aes(x = reorder(role, n), y = n, fill = role)) +
@@ -453,22 +460,15 @@ labs(title = "Number of Players by Role (based on thresholds)",
 x = "Role", y = "Players") +
 theme_minimal(base_size = 12)
 
-
-
-
-# 3) Top players in each role (by a sensible metric)
-
 top_n <- 12
 
 # Top batters by runs
-
 top_batters <- player_stats %>% filter(role == "Batter" | role == "Allrounder") %>% arrange(desc(runs)) %>% slice_head(n = top_n) %>% mutate(metric = runs)
 
 # Top bowlers by wickets
-
 top_bowlers <- player_stats %>% filter(role == "Bowler" | role == "Allrounder") %>% arrange(desc(wickets)) %>% slice_head(n = top_n) %>% mutate(metric = wickets)
 
-# Combine and plot as facet
+# Combine and plot 
 
 top_combined <- bind_rows(
 top_batters %>% mutate(kind = "Top Batters (by runs)"),
@@ -476,10 +476,7 @@ top_bowlers %>% mutate(kind = "Top Bowlers (by wickets)")
 ) %>%
 mutate(player = forcats::fct_reorder(player, metric))
 
-
-
-# Optional: produce a small summary table and save for inspection
-
+# Summary table
 role_summary_table <- player_stats %>%
 arrange(desc(role), desc(runs)) %>%
 select(player, role, runs, balls_faced, wickets, balls_bowled, overs_bowled)

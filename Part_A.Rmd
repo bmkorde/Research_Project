@@ -1,0 +1,490 @@
+---
+title: "Project"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-09-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(jsonlite)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(readr)
+library(stringr)
+data_root <- "bbl_json"
+data_file <- "524915.json"
+data_path <- file.path(data_root,data_file)
+
+sample_json <- fromJSON(readLines(data_path, warn = FALSE))
+overs_df <- sample_json$innings[1, "overs"][[1]]
+deliveries <- overs_df$deliveries[[7]]
+wickets <- overs_df$deliveries[[7]]$wickets[[5]]
+target <- sample_json$innings$target$runs[[2]]
+```
+
+```{r}
+library(jsonlite)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(readr)
+library(stringr)
+
+data_root <- "bbl_json"
+files <- list.files(data_root, pattern = "*.json", full.names = TRUE)
+
+# Helper functions
+clean_venues <- function(venue) {
+  case_when(
+    venue == "Aurora Stadium" ~ "Aurora Stadium, Launceston",
+    venue == "Brisbane Cricket Ground" ~ "Brisbane Cricket Ground, Woolloongabba, Brisbane",
+    venue == "Brisbane Cricket Ground, Woolloongabba" ~ "Brisbane Cricket Ground, Woolloongabba, Brisbane",
+    venue == "Bellerive Oval" ~ "Bellerive Oval, Hobart",
+    venue == "Docklands Stadium" ~ "Docklands Stadium, Melbourne",
+    venue == "Geelong Cricket Ground" ~ "GMHBA Stadium, South Geelong, Victoria",
+    venue == "Simonds Stadium, South Geelong, Victoria" ~ "GMHBA Stadium, South Geelong, Victoria",
+    venue == "International Sports Stadium" ~ "International Sports Stadium, Coffs Harbour",
+    venue == "Manuka Oval" ~ "Manuka Oval, Canberra",
+    venue == "W.A.C.A. Ground" ~ "Western Australia Cricket Association Ground",
+    venue == "Sydney Cricket Ground" ~ "Sydney Cricket Ground, Sydney",
+    TRUE ~ venue
+  )
+}
+
+get_home_team <- function(info) {
+  venue <- info$venue
+  teams <- info$teams
+  if (venue == "Adelaide Oval" && "Adelaide Strikers" %in% teams) "Adelaide Strikers"
+  else if (venue == "Aurora Stadium, Launceston" && "Hobart Hurricanes" %in% teams) "Hobart Hurricanes"
+  else if (venue == "Bellerive Oval, Hobart" && "Hobart Hurricanes" %in% teams) "Hobart Hurricanes"
+  else if (venue == "Brisbane Cricket Ground, Woolloongabba, Brisbane" && "Brisbane Heat" %in% teams) "Brisbane Heat"
+  else if (venue == "Docklands Stadium, Melbourne" && "Melbourne Renegades" %in% teams) "Melbourne Renegades"
+  else if (venue == "Carrara Oval" && "Brisbane Heat" %in% teams) "Brisbane Heat"
+  else if (venue == "GMHBA Stadium, South Geelong, Victoria" && "Melbourne Renegades" %in% teams) "Melbourne Renegades"
+  else if (venue == "Melbourne Cricket Ground" && "Melbourne Stars" %in% teams) "Melbourne Stars"
+  else if (venue == "Melbourne Cricket Ground" && "Melbourne Renegades" %in% teams) "Melbourne Renegades"
+  else if (venue == "Perth Stadium" && "Perth Scorchers" %in% teams) "Perth Scorchers"
+  else if (venue == "Stadium Australia" && "Sydney Sixers" %in% teams) "Sydney Sixers"
+  else if (venue == "Stadium Australia" && "Sydney Thunder" %in% teams) "Sydney Thunder"
+  else if (venue == "Sydney Cricket Ground, Sydney" && "Sydney Sixers" %in% teams) "Sydney Sixers"
+  else if (venue == "Sydney Cricket Ground, Sydney" && "Sydney Thunder" %in% teams) "Sydney Thunder"
+  else if (venue == "Sydney Showground Stadium" && "Sydney Thunder" %in% teams) "Sydney Thunder"
+  else if (venue == "Sydney Showground Stadium" && "Sydney Sixers" %in% teams) "Sydney Sixers"
+  else if (venue == "Manuka Oval, Canberra" && "Sydney Thunder" %in% teams) "Sydney Thunder"
+  else if (venue == "Manuka Oval, Canberra" && "Sydney Sixers" %in% teams) "Sydney Sixers"
+  else if (venue == "Western Australia Cricket Association Ground" && "Perth Scorchers" %in% teams) "Perth Scorchers"
+  else if (venue == "University of Tasmania Stadium, Launceston" && "Hobart Hurricanes" %in% teams) "Hobart Hurricanes"
+  else NA_character_
+}
+```
+
+```{r}
+playing_xi <- map_dfr(files, function(file) {
+  tryCatch({
+    json <- fromJSON(readLines(file, warn = FALSE))
+    info <- json$info
+    match_id <- as.character(str_remove(basename(file), ".json"))
+    
+    # Extract team names and players
+    teams <- info$teams
+    players_list <- info$players
+    
+    # Flatten into long format
+    map_dfr(teams, function(team_name) {
+      tibble(
+        match_id = match_id,
+        team = team_name,
+        player = players_list[[team_name]]
+      )
+    })
+    
+  }, error = function(e) {
+    message("Error extracting XI from ", file, ": ", conditionMessage(e))
+    return(tibble())
+  })
+})
+
+# Preview
+playing_xi %>% filter(match_id == unique(playing_xi$match_id)[1])
+
+
+target_df <- map_dfr(files, function(file) {
+  tryCatch({
+    json <- fromJSON(readLines(file, warn = FALSE))
+    match_id <- str_remove(basename(file), ".json")
+    
+    # Extract target from second innings if available
+    target_runs <- json$innings$target$runs[2] %||% NA_integer_
+    
+    tibble(
+      match_id = match_id,
+      target = target_runs
+    )
+    
+  }, error = function(e) {
+    message("Error extracting target from ", file, ": ", conditionMessage(e))
+    return(tibble())
+  })
+})
+
+```
+
+```{r}
+balls <- map_dfr(files, function(file) {
+  tryCatch({
+    json <- fromJSON(readLines(file, warn = FALSE))
+    info <- json$info
+    info$venue <- clean_venues(info$venue)
+    # --- Extract target score if available ---
+    target_runs <- tryCatch({
+      json$innings$target$runs[[2]] %||% NA_integer_
+    }, error = function(e) NA_integer_)
+    # --- Match-level metadata ---
+    row_meta <- tibble(
+      match_id = as.character(str_remove(basename(file), ".json")),
+      date = as.character(info$dates[[1]]),
+      team1 = as.character(info$teams[[1]]),
+      team2 = as.character(info$teams[[2]]),
+      home_team = as.character(get_home_team(info)),
+      winner = as.character(info$outcome$winner %||% NA_character_),
+      result = as.character(info$outcome$result %||% NA_character_),
+      winner_by_runs = as.integer(info$outcome$by$runs %||% NA_integer_),
+      winner_by_wickets = as.integer(info$outcome$by$wickets %||% NA_integer_),
+      venue = as.character(info$venue),
+      target = target_runs
+    )
+    
+    # --- Innings-level iteration ---
+    map_dfr(1:nrow(json$innings), function(i) {
+      team <- as.character(json$innings[i, "team"][[1]])
+      overs_df <- json$innings[i, "overs"][[1]]
+      
+      # --- Over-level iteration ---
+      map_dfr(1:nrow(overs_df), function(o) {
+        deliveries <- overs_df$deliveries[[o]]
+        over_num <- as.integer(overs_df$over[o])
+        
+        # --- Delivery-level flattening ---
+        deliveries_flat <- deliveries %>%
+          mutate(
+            innings = as.integer(i),
+            team = as.character(team),
+            over = over_num,
+            ball_in_over = row_number(),
+            delivery = as.numeric(sprintf("%d.%d", over_num, ball_in_over)),
+            batter = as.character(batter %||% NA_character_),
+            bowler = as.character(bowler %||% NA_character_),
+            non_striker = as.character(non_striker %||% NA_character_),
+            runs_batter = as.integer(runs$batter %||% 0),
+            runs_extras = as.integer(runs$extras %||% 0),
+            runs_total = as.integer(runs$total %||% 0),
+            powerplay = as.logical(over_num < 6),
+            powerplay_type = as.character(if (over_num < 6) "Mandatory" else NA_character_)
+          )
+        
+        # --- Wicket logic safely extracted row-wise ---
+        wicket_info <- map_dfr(seq_len(nrow(deliveries)), function(b) {
+          wkts <- deliveries$wickets[[b]]
+          tibble(
+            wicket = !is.null(wkts),
+            wicket_type = if (!is.null(wkts)) wkts$kind[1] else NA_character_,
+            wicket_player_out = if (!is.null(wkts)) wkts$player_out[1] else NA_character_
+          )
+        })
+        
+        # --- Combine safely ---
+        bind_cols(deliveries_flat, wicket_info)
+      })
+    }) %>% bind_cols(row_meta[rep(1, nrow(.)), ])
+    
+  }, error = function(e) {
+    message("Error processing ", file, ": ", conditionMessage(e))
+    return(tibble())
+  })
+})
+
+balls <- balls %>% arrange(date,match_id, innings, delivery)
+head(balls)
+
+
+
+```
+
+```{r}
+library(dplyr)
+
+# --- Batting scorecard ---
+batting_scorecard <- balls %>%
+  group_by(match_id, batter) %>%
+  summarise(
+    balls_faced = n(),
+    runs = sum(runs_batter, na.rm = TRUE),
+    fours = sum(runs_batter == 4, na.rm = TRUE),
+    sixes = sum(runs_batter == 6, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(match_id, desc(runs))
+
+# --- Bowling scorecard ---
+bowling_scorecard <- balls %>%
+  group_by(match_id, bowler) %>%
+  summarise(
+    balls_bowled = n(),
+    overs = balls_bowled %/% 6 + (balls_bowled %% 6) / 10,
+    dot_balls = sum(runs_total == 0, na.rm = TRUE),
+    wickets = sum(wicket & !is.na(wicket_player_out), na.rm = TRUE),
+    runs_conceded = sum(runs_total, na.rm = TRUE),
+    runs_extras = sum(runs_extras, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(match_id, desc(wickets))
+
+
+# --- View one match example ---
+match_example <- unique(balls$match_id)[1]
+
+batting_scorecard %>% filter(match_id == match_example)
+bowling_scorecard %>% filter(match_id == match_example)
+```
+
+```{r}
+snapshot_df <- balls %>%
+  filter(innings == 2) %>%
+  group_by(match_id) %>%
+  mutate(
+    balls_bowled = row_number(),
+    overs_completed = floor(balls_bowled / 6) + (balls_bowled %% 6) / 10,
+    current_runs = cumsum(runs_total),
+    wickets_lost = cumsum(wicket),
+    balls_remaining = 120 - balls_bowled,
+    run_rate = current_runs / overs_completed,
+    required_run_rate = if_else(innings == 2 & !is.na(target),
+                            (target - current_runs) / (balls_remaining / 6),
+                            NA_real_),
+    batting_team = team,
+    bowling_team = if_else(team == team1, team2, team1),
+    target = target
+  ) %>%
+  filter(overs_completed >= 13) %>%
+  slice_head(n = 1) %>%  # First delivery after 13th over
+  ungroup() %>%
+  mutate(
+    remaining_wickets = 10 - wickets_lost,
+    match_winner = if_else(batting_team == winner, 1, 0),
+    
+  ) %>%
+  select(
+    match_id,
+    date,
+    venue,
+    batting_team,
+    bowling_team,
+    target,
+    current_runs,
+    wickets_lost,
+    remaining_wickets,
+    balls_bowled,
+    balls_remaining,
+    overs_completed,
+    run_rate,
+    required_run_rate,
+    powerplay,
+    home_team,
+    winner,
+    match_winner
+  )
+
+
+```
+
+
+
+```{r}
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(pROC)
+library(ggplot2)
+library(broom)
+library(dplyr)
+
+# Step 1: Prepare data
+model_data <- snapshot_df %>%
+  mutate(across(c(batting_team, bowling_team, venue, home_team), as.factor),
+         match_winner = as.factor(match_winner)) %>%
+  drop_na(match_winner)
+
+# Step 2: Train-test split
+set.seed(42)
+train_index <- createDataPartition(model_data$match_winner, p = 0.8, list = FALSE)
+train_data <- model_data[train_index, ]
+test_data <- model_data[-train_index, ]
+
+# Step 3: Align factor levels
+for (col in c("batting_team", "bowling_team", "venue", "home_team")) {
+  test_data[[col]] <- factor(test_data[[col]], levels = levels(train_data[[col]]))
+}
+
+# Step 4: Drop rows with unseen levels (now NA)
+test_data <- test_data %>%
+  filter(!is.na(batting_team), !is.na(bowling_team), !is.na(venue), !is.na(home_team))
+
+# Step 5: Logistic regression model
+log_model <- glm(match_winner ~ current_runs + wickets_lost + remaining_wickets +
+                   balls_remaining + overs_completed + run_rate + required_run_rate +
+                   powerplay + batting_team + bowling_team + venue + home_team,
+                 data = train_data, family = binomial)
+
+summary(log_model)
+
+# Step 6: Predict and evaluate
+log_probs <- predict(log_model, test_data, type = "response")
+log_pred <- ifelse(log_probs > 0.5, 1, 0)
+confusionMatrix(factor(log_pred), test_data$match_winner)
+
+# Step 7: Decision tree model
+tree_model <- rpart(match_winner ~ current_runs + wickets_lost + remaining_wickets +
+                      balls_remaining + overs_completed + run_rate + required_run_rate +
+                      powerplay + batting_team + bowling_team + venue + home_team,
+                    data = train_data, method = "class", control = rpart.control(cp = 0.01))
+
+tree_pred <- predict(tree_model, test_data, type = "class")
+confusionMatrix(tree_pred, test_data$match_winner)
+
+# Step 8: Visualize decision tree
+rpart.plot(tree_model, type = 2, extra = 104, fallen.leaves = TRUE)
+
+# Step 9: ROC curve and AUC
+roc_curve <- roc(test_data$match_winner, log_probs)
+plot(roc_curve, col = "blue", main = "ROC Curve - Logistic Regression")
+auc(roc_curve)
+
+# Step 10: Variable importance (logistic regression)
+tidy(log_model) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(abs_estimate = abs(estimate)) %>%
+  ggplot(aes(x = reorder(term, abs_estimate), y = abs_estimate)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Variable Importance (Logistic Regression)",
+       x = "Predictor", y = "Absolute Coefficient")
+
+
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# Prepare bowling summary consistent with batting_scorecard naming
+
+bowling_summary <- bowling_scorecard %>%
+rename(balls_bowled = balls_bowled, runs_conceded = runs_conceded, wickets_taken = wickets) %>%
+select(match_id, bowler, balls_bowled, overs, wickets_taken, runs_conceded) %>%
+group_by(bowler) %>%
+summarise(
+balls_bowled = sum(balls_bowled, na.rm = TRUE),
+wickets = sum(wickets_taken, na.rm = TRUE),
+runs_conceded = sum(runs_conceded, na.rm = TRUE),
+.groups = "drop"
+) %>%
+rename(player = bowler)
+
+# Prepare batting summary
+
+batting_summary <- batting_scorecard %>%
+group_by(batter) %>%
+summarise(
+balls_faced = sum(balls_faced, na.rm = TRUE),
+runs = sum(runs, na.rm = TRUE),
+fours = sum(fours, na.rm = TRUE),
+sixes = sum(sixes, na.rm = TRUE),
+.groups = "drop"
+) %>%
+rename(player = batter)
+
+# Combine batting + bowling (players may appear in only one)
+
+player_stats <- full_join(batting_summary, bowling_summary, by = "player") %>%
+replace_na(list(
+balls_faced = 0,
+runs = 0,
+fours = 0,
+sixes = 0,
+balls_bowled = 0,
+wickets = 0,
+runs_conceded = 0
+))
+
+# Convert balls_bowled to overs_decimal if you want a readable value
+
+player_stats <- player_stats %>%
+mutate(
+overs_bowled = balls_bowled / 6,
+# Classification rules (allrounder first)
+role = case_when(
+balls_faced >= 20 & balls_bowled >= 12 ~ "Allrounder",       # >=2 overs (12 balls) and >=20 balls faced
+balls_bowled >= 18 & !(balls_faced >= 20 & balls_bowled >= 12) ~ "Bowler",  # >=3 overs (18 balls) & not allrounder
+balls_faced >= 20 & !(balls_faced >= 20 & balls_bowled >= 12) ~ "Batter",   # >=20 balls faced & not allrounder
+TRUE ~ "Other"
+)
+)
+
+# Inspect top few
+
+player_stats %>% arrange(desc(role), desc(runs)) %>% slice_head(n = 20)
+
+
+# 1) Count of players by role
+
+role_counts <- player_stats %>% count(role) %>% arrange(desc(n))
+ggplot(role_counts, aes(x = reorder(role, n), y = n, fill = role)) +
+geom_col(show.legend = FALSE) +
+coord_flip() +
+labs(title = "Number of Players by Role (based on thresholds)",
+x = "Role", y = "Players") +
+theme_minimal(base_size = 12)
+
+
+
+
+# 3) Top players in each role (by a sensible metric)
+
+top_n <- 12
+
+# Top batters by runs
+
+top_batters <- player_stats %>% filter(role == "Batter" | role == "Allrounder") %>% arrange(desc(runs)) %>% slice_head(n = top_n) %>% mutate(metric = runs)
+
+# Top bowlers by wickets
+
+top_bowlers <- player_stats %>% filter(role == "Bowler" | role == "Allrounder") %>% arrange(desc(wickets)) %>% slice_head(n = top_n) %>% mutate(metric = wickets)
+
+# Combine and plot as facet
+
+top_combined <- bind_rows(
+top_batters %>% mutate(kind = "Top Batters (by runs)"),
+top_bowlers %>% mutate(kind = "Top Bowlers (by wickets)")
+) %>%
+mutate(player = forcats::fct_reorder(player, metric))
+
+
+
+# Optional: produce a small summary table and save for inspection
+
+role_summary_table <- player_stats %>%
+arrange(desc(role), desc(runs)) %>%
+select(player, role, runs, balls_faced, wickets, balls_bowled, overs_bowled)
+
+
+
+```
+
